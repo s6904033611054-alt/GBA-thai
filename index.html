@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GBA Emulator</title>
+
+<!-- Firebase (compat SDK - แก้เวอร์ชันได้ถ้าต้องการ) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+
+<style>
+  :root {
+    --bg: #14151a; --panel: #1c1e26; --accent: #7ee787;
+    --text: #d7dae0; --muted: #6b7080; --err: #ff6b6b;
+    --mono: 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--mono); min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 24px 16px 60px;
+  }
+  h1 { font-size: 15px; color: var(--muted); margin: 0 0 20px; font-weight: 400; }
+  h1 span { color: var(--accent); }
+
+  .panel {
+    width: 320px; max-width: 100%; background: var(--panel);
+    border-radius: 6px; padding: 20px; display: flex;
+    flex-direction: column; gap: 10px;
+  }
+  .panel input {
+    background: #14151a; border: 1px solid #2b2e38; color: var(--text);
+    font-family: var(--mono); font-size: 13px; padding: 8px 10px; border-radius: 4px;
+  }
+  .panel button, .controls button, .controls label {
+    background: #262a36; border: 1px solid #2b2e38; color: var(--text);
+    font-family: var(--mono); font-size: 13px; padding: 8px 12px;
+    border-radius: 4px; cursor: pointer;
+  }
+  .panel button:hover, .controls button:hover { border-color: var(--accent); }
+  .panel .row { display: flex; gap: 8px; }
+  .panel .row button { flex: 1; }
+  #auth-error { color: var(--err); font-size: 12px; min-height: 14px; }
+
+  #game-wrap {
+    width: 480px; max-width: 100%; background: var(--panel);
+    border-radius: 6px; padding: 10px; display: none;
+  }
+  #game { width: 100%; aspect-ratio: 3/2; background: #000; border-radius: 3px; }
+
+  .controls {
+    width: 480px; max-width: 100%; margin-top: 14px;
+    display: none; flex-wrap: wrap; gap: 8px;
+  }
+  #status {
+    width: 480px; max-width: 100%; margin-top: 10px;
+    font-size: 12px; color: var(--muted); min-height: 16px;
+  }
+</style>
+</head>
+<body>
+
+  <h1>gba<span>::</span>emulator — เซฟออนไลน์</h1>
+
+  <!-- ฟอร์ม login/สมัคร -->
+  <div class="panel" id="auth-panel">
+    <input type="email" id="email" placeholder="อีเมล">
+    <input type="password" id="password" placeholder="รหัสผ่าน">
+    <div class="row">
+      <button id="btn-login">เข้าสู่ระบบ</button>
+      <button id="btn-signup">สมัครสมาชิก</button>
+    </div>
+    <div id="auth-error"></div>
+  </div>
+
+  <div id="game-wrap"><div id="game"></div></div>
+
+  <div class="controls">
+    <button id="btn-fullscreen">Fullscreen</button>
+    <button id="btn-logout">ออกจากระบบ</button>
+  </div>
+
+  <div id="status"></div>
+
+<script>
+  // ===== 1) ตั้งค่า Firebase ของคุณเอง (คัดลอกจาก Firebase Console > Project settings) =====
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+  const db = firebase.firestore();
+
+  // ===== 2) ROM ที่ hosted อยู่บนเว็บคุณเองแล้ว — แก้ path ตรงนี้ =====
+  const ROM_URL = '/roms/game.gba';
+  const GAME_ID = 1; // เปลี่ยนเลขถ้ามีหลายเกมในเว็บเดียวกัน
+
+  const $ = (id) => document.getElementById(id);
+  const setStatus = (msg) => $('status').textContent = msg;
+
+  // ---------- Auth ----------
+  $('btn-signup').onclick = () => {
+    $('auth-error').textContent = '';
+    auth.createUserWithEmailAndPassword($('email').value, $('password').value)
+      .catch(e => $('auth-error').textContent = e.message);
+  };
+  $('btn-login').onclick = () => {
+    $('auth-error').textContent = '';
+    auth.signInWithEmailAndPassword($('email').value, $('password').value)
+      .catch(e => $('auth-error').textContent = e.message);
+  };
+  $('btn-logout').onclick = () => {
+    auth.signOut();
+    $('game-wrap').style.display = 'none';
+    document.querySelector('.controls').style.display = 'none';
+    $('auth-panel').style.display = 'flex';
+    $('game').innerHTML = '';
+  };
+
+  auth.onAuthStateChanged(async (user) => {
+    if (!user) return;
+    $('auth-panel').style.display = 'none';
+    $('game-wrap').style.display = 'block';
+    document.querySelector('.controls').style.display = 'flex';
+    setStatus('กำลังโหลดเซฟล่าสุด...');
+
+    const saveDocRef = db.collection('saves').doc(user.uid + '_' + GAME_ID);
+    let loadStateUrl = null;
+
+    try {
+      const doc = await saveDocRef.get();
+      if (doc.exists && doc.data().state) {
+        const blob = base64ToBlob(doc.data().state);
+        loadStateUrl = URL.createObjectURL(blob);
+        setStatus('พบเซฟออนไลน์ — กำลังโหลดเกม');
+      } else {
+        setStatus('ไม่มีเซฟเก่า — เริ่มเกมใหม่');
+      }
+    } catch (e) {
+      setStatus('โหลดเซฟไม่สำเร็จ (' + e.message + ') — เริ่มเกมใหม่');
+    }
+
+    startEmulator(loadStateUrl, saveDocRef);
+  });
+
+  // ---------- Emulator ----------
+  function startEmulator(loadStateUrl, saveDocRef) {
+    window.EJS_player = '#game';
+    window.EJS_core = 'gba';
+    window.EJS_gameUrl = ROM_URL;
+    window.EJS_gameID = GAME_ID;
+    window.EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+    window.EJS_startOnLoaded = true;
+    window.EJS_backgroundColor = '#000000';
+    if (loadStateUrl) window.EJS_loadStateURL = loadStateUrl;
+
+    window.EJS_ready = () => setStatus('พร้อมเล่น — กด Save State เพื่อบันทึกขึ้นออนไลน์');
+    window.EJS_onGameStart = () => setStatus('กำลังเล่น');
+
+    // ทุกครั้งที่กดปุ่ม Save State ในตัวอีมูเลเตอร์ -> อัปโหลด state ขึ้น Firestore
+    window.EJS_onSaveState = async (e) => {
+      try {
+        const stateData = e[1]; // [screenshot, save state]
+        const base64 = await toBase64(stateData);
+        await saveDocRef.set({ state: base64, updatedAt: Date.now() });
+        setStatus('บันทึกขึ้นออนไลน์แล้ว ✓');
+      } catch (err) {
+        setStatus('บันทึกออนไลน์ไม่สำเร็จ: ' + err.message);
+      }
+    };
+
+    const script = document.createElement('script');
+    script.src = window.EJS_pathtodata + 'loader.js';
+    document.body.appendChild(script);
+  }
+
+  $('btn-fullscreen').onclick = () => $('game-wrap').requestFullscreen?.();
+
+  // ---------- Helpers ----------
+  function toBase64(data) {
+    return new Promise((resolve, reject) => {
+      const blob = (data instanceof Blob) ? data : new Blob([data]);
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+  function base64ToBlob(base64) {
+    const bytes = atob(base64);
+    const arr = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+    return new Blob([arr]);
+  }
+</script>
+
+</body>
+</html>
